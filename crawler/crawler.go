@@ -156,6 +156,12 @@ func (c *crawler) Run() map[string]SiteContent {
 	c.collector.Visit(fmt.Sprintf("https://%s", c.config.Domain))
 	c.collector.Wait()
 
+	for k, v := range result {
+		if 0 == len(v.Body) {
+			delete(result, k)
+		}
+	}
+
 	return result
 }
 
