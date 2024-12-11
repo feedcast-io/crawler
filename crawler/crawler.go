@@ -7,6 +7,7 @@ import (
 	"github.com/gocolly/colly"
 	"github.com/microcosm-cc/bluemonday"
 	"html"
+	"log"
 	"regexp"
 	"strings"
 	"sync"
@@ -71,6 +72,8 @@ func NewCrawler(config Config) *crawler {
 type SiteContent struct {
 	Description string `json:"description"`
 	Body        string `json:"body"`
+	Title       string `json:"title"`
+	Keywords    string `json:"keywords"`
 }
 
 func (c *crawler) Run() map[string]SiteContent {
@@ -104,6 +107,33 @@ func (c *crawler) Run() map[string]SiteContent {
 		c.m.Unlock()
 	})
 
+	c.collector.OnHTML("title", func(e *colly.HTMLElement) {
+		c.m.Lock()
+		key := e.Request.URL.String()
+		o, ok := result[key]
+		if !ok {
+			o = SiteContent{}
+		}
+
+		o.Title, _ = e.DOM.Html()
+		result[key] = o
+
+		c.m.Unlock()
+	})
+
+	c.collector.OnHTML("meta[name=keywords]", func(e *colly.HTMLElement) {
+		c.m.Lock()
+		key := e.Request.URL.String()
+		o, ok := result[key]
+		if !ok {
+			o = SiteContent{}
+		}
+		o.Keywords, _ = e.DOM.Attr("content")
+		result[key] = o
+
+		c.m.Unlock()
+	})
+
 	c.collector.OnHTML("meta[name=description]", func(e *colly.HTMLElement) {
 		c.m.Lock()
 		key := e.Request.URL.String()
@@ -114,6 +144,10 @@ func (c *crawler) Run() map[string]SiteContent {
 		o.Description, _ = e.DOM.Attr("content")
 		result[key] = o
 		c.m.Unlock()
+	})
+
+	c.collector.OnScraped(func(response *colly.Response) {
+		log.Println("End page crawl", response.Request.URL.String())
 	})
 
 	c.collector.OnHTML("a[href]", func(e *colly.HTMLElement) {

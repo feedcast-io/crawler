@@ -10,7 +10,7 @@ prod:
 		--allow-unauthenticated \
 		--entry-point=crawl \
 		--source . \
-		--cpu=0.166 \
+		--cpu=0.664 \
 		--memory=128Mi \
 		--timeout=300 \
 		--min-instances=0 \
