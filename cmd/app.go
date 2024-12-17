@@ -1,9 +1,9 @@
 package main
 
 import (
-	"feedcast.crawler/crawler"
+	"github.com/feedcast-io/crawler"
+	"log"
 	"log/slog"
-	"os"
 )
 
 func main() {
@@ -12,22 +12,25 @@ func main() {
 
 func testAkoutic() {
 	c := crawler.Config{
-		Domain:   "https://www.akoustik-online.com",
+		Domain:   "https://www.lemonde.fr/",
 		MaxPages: 100,
 		//MaxDuration: 5,
 		MaxDepth: 5,
 	}
 
-	h := slog.NewJSONHandler(os.Stdout, nil)
-	logger := slog.New(h)
-	slog.SetDefault(logger)
-
-	//c.Domain = "https://airtable.com"
-	c.Touch()
-
 	cr := crawler.NewCrawler(c)
 
-	data := cr.Run()
+	if ch, e := cr.Run(); nil != e {
+		log.Fatal(e)
+	} else {
+		log.Println("Start process")
 
-	slog.Info("End crawl", "domain", c.Domain, "found", len(data))
+		found := 0
+		for page := range ch {
+			log.Println("Fetch success", page.Url)
+			found++
+		}
+
+		slog.Info("End crawl")
+	}
 }

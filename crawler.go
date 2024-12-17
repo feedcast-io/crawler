@@ -5,31 +5,29 @@ import (
 	"github.com/gocolly/colly"
 	"github.com/microcosm-cc/bluemonday"
 	"html"
-	"log"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
-
-type crawler struct {
+type Crawler struct {
 	config    Config
 	collector *colly.Collector
 	m         *sync.Mutex
 	p         *bluemonday.Policy
+	res       map[string]PageSummary
 }
 
-func NewCrawler(config Config) *crawler {
-	p := bluemonday.UGCPolicy()
+func NewCrawler(config Config) *Crawler {
+	config.touch()
 
-	p = bluemonday.NewPolicy()
-
+	p := bluemonday.NewPolicy()
 	p.AllowImages()
 	p.AllowElements("br")
 	p.SkipElementsContent("header", "footer", "a", "script", "object")
 
-	return &crawler{
+	return &Crawler{
 		config: config,
 		collector: colly.NewCollector(
 			colly.Async(true),
@@ -40,92 +38,90 @@ func NewCrawler(config Config) *crawler {
 	}
 }
 
-type SiteContent struct {
-	Description string `json:"description"`
-	Body        string `json:"body"`
-	Title       string `json:"title"`
-	Keywords    string `json:"keywords"`
+func (c *Crawler) savePageAttribute(url, value string, attr pageAttribute) {
+	c.m.Lock()
+	o, ok := c.res[url]
+	if !ok {
+		o = PageSummary{}
+	}
+
+	switch attr {
+	case attrBody:
+		o.Body = value
+		break
+	case attrTitle:
+		o.Title = value
+		break
+	case attrKeywords:
+		o.Keywords = value
+		break
+	case attrDesc:
+		o.Description = value
+		break
+	}
+
+	c.res[url] = o
+	c.m.Unlock()
 }
 
-func (c *crawler) Run() map[string]SiteContent {
-	result := make(map[string]SiteContent)
+func (c *Crawler) Run() (chan PageSummary, error) {
+	c.res = make(map[string]PageSummary)
 
-	maxBeforeSkip := time.Now().Add(time.Duration(c.config.MaxDuration) * time.Second)
+	chPages := make(chan PageSummary)
+
+	if e := c.config.Validate(); nil != e {
+		close(chPages)
+		return chPages, e
+	}
+
+	endCrawlLimit := time.Now().Add(time.Duration(c.config.MaxDuration) * time.Second)
 
 	processed := 0
 
 	c.collector.Limit(&colly.LimitRule{
 		DomainGlob:  fmt.Sprintf("*%s*", c.config.Domain),
-		Parallelism: 3,
+		Delay:       time.Millisecond * 100,
+		Parallelism: 4,
 	})
 
 	c.collector.OnHTML("body", func(e *colly.HTMLElement) {
-		raw, _ := e.DOM.Html()
-		c.m.Lock()
-		key := e.Request.URL.String()
-		o, ok := result[key]
-		if !ok {
-			o = SiteContent{}
-		}
-		o.Body = c.p.Sanitize(raw)
-		o.Body = strings.ReplaceAll(o.Body, "<br>", "\n")
-		o.Body = strings.ReplaceAll(o.Body, "<br/>", "\n")
-		o.Body = strings.ReplaceAll(o.Body, "<br />", "\n")
-		o.Body = html.UnescapeString(o.Body)
 		re, _ := regexp.Compile(`(\s\s)\s*`)
-		o.Body = re.ReplaceAllString(o.Body, "$1")
-		result[key] = o
-		c.m.Unlock()
+		raw, _ := e.DOM.Html()
+		raw = c.p.Sanitize(raw)
+		raw = strings.ReplaceAll(raw, "<br>", "\n")
+		raw = strings.ReplaceAll(raw, "<br/>", "\n")
+		raw = strings.ReplaceAll(raw, "<br />", "\n")
+		raw = html.UnescapeString(raw)
+		raw = re.ReplaceAllString(raw, "$1")
+
+		c.savePageAttribute(e.Request.URL.String(), raw, attrBody)
 	})
 
 	c.collector.OnHTML("title", func(e *colly.HTMLElement) {
-		c.m.Lock()
-		key := e.Request.URL.String()
-		o, ok := result[key]
-		if !ok {
-			o = SiteContent{}
-		}
-
-		o.Title, _ = e.DOM.Html()
-		result[key] = o
-
-		c.m.Unlock()
+		title, _ := e.DOM.Html()
+		c.savePageAttribute(e.Request.URL.String(), title, attrTitle)
 	})
 
 	c.collector.OnHTML("meta[name=keywords]", func(e *colly.HTMLElement) {
-		c.m.Lock()
-		key := e.Request.URL.String()
-		o, ok := result[key]
-		if !ok {
-			o = SiteContent{}
-		}
-		o.Keywords, _ = e.DOM.Attr("content")
-		result[key] = o
-
-		c.m.Unlock()
+		keywords, _ := e.DOM.Attr("content")
+		c.savePageAttribute(e.Request.URL.String(), keywords, attrKeywords)
 	})
 
 	c.collector.OnHTML("meta[name=description]", func(e *colly.HTMLElement) {
-		c.m.Lock()
-		key := e.Request.URL.String()
-		o, ok := result[key]
-		if !ok {
-			o = SiteContent{}
-		}
-		o.Description, _ = e.DOM.Attr("content")
-		result[key] = o
-		c.m.Unlock()
+		desc, _ := e.DOM.Attr("content")
+		c.savePageAttribute(e.Request.URL.String(), desc, attrDesc)
 	})
 
 	c.collector.OnScraped(func(response *colly.Response) {
-		log.Println("End page crawl", response.Request.URL.String())
+		if o, ok := c.res[response.Request.URL.String()]; ok && len(o.Body) > 0 {
+			o.Url = response.Request.URL.String()
+			chPages <- o
+		}
 	})
 
 	c.collector.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		parts := strings.Split(e.Attr("href"), "#")
 		link := parts[0]
-
-		//isRelative := 0 == strings.Index(link, "/")
 
 		ignoreLink := "nofollow" == e.Attr("rel") ||
 			0 == len(link) ||
@@ -135,9 +131,7 @@ func (c *crawler) Run() map[string]SiteContent {
 		// Ignore link if parent is header or footer depending on config
 		if !c.config.KeepHeaderFooterLinks {
 			for _, n := range e.DOM.Parents().Nodes {
-				ignoreLink = ignoreLink ||
-					"header" == n.Data ||
-					"footer" == n.Data
+				ignoreLink = ignoreLink || "header" == n.Data || "footer" == n.Data
 			}
 		}
 
@@ -146,31 +140,28 @@ func (c *crawler) Run() map[string]SiteContent {
 		linkUrl := strings.Split(link, "?")[0]
 		linkUrl = c.getUrlForCrawl(linkUrl)
 
-		if _, alreadyVisited := result[linkUrl]; !alreadyVisited &&
+		if _, alreadyVisited := c.res[linkUrl]; !alreadyVisited &&
 			!ignoreLink &&
 			len(linkUrl) > 0 &&
 			processed < int(c.config.MaxPages) &&
-			maxBeforeSkip.After(time.Now()) {
+			endCrawlLimit.After(time.Now()) {
 			processed++
-			result[linkUrl] = SiteContent{}
+			c.res[linkUrl] = PageSummary{}
 			e.Request.Visit(linkUrl)
 		}
 		c.m.Unlock()
 	})
 
-	c.collector.Visit(fmt.Sprintf("https://%s", c.config.Domain))
-	c.collector.Wait()
+	go func() {
+		c.collector.Visit(fmt.Sprintf("https://%s", c.config.Domain))
+		c.collector.Wait()
+		close(chPages)
+	}()
 
-	for k, v := range result {
-		if 0 == len(v.Body) {
-			delete(result, k)
-		}
-	}
-
-	return result
+	return chPages, nil
 }
 
-func (c *crawler) getUrlForCrawl(linkUrl string) string {
+func (c *Crawler) getUrlForCrawl(linkUrl string) string {
 	// If relative link (without-domain), add protocol & domain
 	if strings.HasPrefix(linkUrl, "/") {
 		return fmt.Sprintf("https://%s%s", c.config.Domain, linkUrl)
